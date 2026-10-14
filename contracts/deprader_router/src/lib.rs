@@ -89,6 +89,7 @@ enum DataKey {
     Bounty(u64),
     Claim(u64, u32),
     ClaimBy(u64, Address),
+    MinAmount(Address),
 }
 
 #[contracterror]
@@ -109,6 +110,7 @@ pub enum Error {
     ClaimNotPending = 17,
     CancelTooEarly = 18,
     NoPendingAdmin = 19,
+    AmountTooSmall = 20,
 }
 
 #[contract]
@@ -173,6 +175,30 @@ impl DepRaderRouter {
         env.storage().instance().get(&DataKey::PendingAdmin)
     }
 
+    /// Admin-only: sets the minimum bounty amount required for `token`
+    /// (default is `0` when unset). Rejects negative values with
+    /// [`Error::InvalidAmount`].
+    pub fn set_min_amount(env: Env, token: Address, min_amount: i128) -> Result<(), Error> {
+        let admin = require_admin(&env)?;
+        if min_amount < 0 {
+            return Err(Error::InvalidAmount);
+        }
+
+        set_persistent(&env, &DataKey::MinAmount(token.clone()), &min_amount);
+        env.events()
+            .publish((symbol_short!("min_amt"), token), (min_amount, admin));
+        Ok(())
+    }
+
+    /// Returns the configured minimum bounty amount for `token`, or `0` if
+    /// none has been set.
+    pub fn get_min_amount(env: Env, token: Address) -> i128 {
+        env.storage()
+            .persistent()
+            .get(&DataKey::MinAmount(token))
+            .unwrap_or(0)
+    }
+
     // ------------------------------------------------------------- bounties
 
     /// Locks `amount` of `token` from `creator` against a new bounty and
@@ -191,6 +217,11 @@ impl DepRaderRouter {
         stored_admin(&env)?;
         if amount <= 0 {
             return Err(Error::InvalidAmount);
+        }
+        let min_amount: i128 =
+            get_persistent(&env, &DataKey::MinAmount(token.clone())).unwrap_or(0);
+        if amount < min_amount {
+            return Err(Error::AmountTooSmall);
         }
         check_ref(&issue_ref)?;
         let now = env.ledger().timestamp();

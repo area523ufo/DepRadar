@@ -319,3 +319,12 @@ is closed — see [CONTRIBUTING.md](CONTRIBUTING.md).
 - **By:** ALLEN-AYODEJI
 - **Closes:** N/A
 - **Status:** Merged.
+
+### deprader_router contract — per-token minimum bounty amount
+
+- **What:** Adds `DataKey::MinAmount(Address)` and `Error::AmountTooSmall = 20` to `contracts/deprader_router/src/lib.rs`, along with admin-gated `set_min_amount(token, min_amount)` and public `get_min_amount(token)` (default `0`). `create_bounty` rejects amounts below the configured token minimum with `Error::AmountTooSmall`.
+- **Tests:** Contract unit test in `contracts/deprader_router/src/test.rs` covering default `0`, negative `min_amount` rejection, admin auth and event emission, and `create_bounty` below (`99`), at (`100`), and above (`150`) the minimum as well as independent per-token defaults. Snapshots updated and `wasm32v1-none` build verified.
+- **By:** area523ufo
+- **Closes:** #172
+- **Status:** Ready for review.
+

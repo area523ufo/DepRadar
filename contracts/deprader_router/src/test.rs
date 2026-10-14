@@ -513,3 +513,75 @@ fn test_admin_rotation_is_two_step() {
     t.client.release(&bounty_id, &claim_id);
     assert_eq!(t.last_auth(), new_admin);
 }
+
+// --------------------------------------------------------------- min_amount
+
+#[test]
+fn test_min_amount_per_token_enforced_at_below_and_above() {
+    let t = setup();
+
+    // Default minimum is 0 for any token.
+    assert_eq!(t.client.get_min_amount(&t.token.address), 0);
+
+    // Negative min_amount is rejected.
+    assert_eq!(
+        t.client.try_set_min_amount(&t.token.address, &-1),
+        Err(Ok(Error::InvalidAmount))
+    );
+
+    // Admin sets min_amount = 100 for `t.token`.
+    t.client.set_min_amount(&t.token.address, &100);
+    assert_eq!(t.last_auth(), t.admin);
+    assert_eq!(t.last_event_topic(), symbol_short!("min_amt"));
+    assert_eq!(t.client.get_min_amount(&t.token.address), 100);
+
+    // Below minimum (99) is rejected with AmountTooSmall; no funds move and no ID is consumed.
+    assert_eq!(
+        t.client.try_create_bounty(
+            &t.creator,
+            &t.s("org/repo#below"),
+            &99,
+            &t.token.address,
+            &DEADLINE,
+        ),
+        Err(Ok(Error::AmountTooSmall))
+    );
+    assert_eq!(t.client.bounty_count(), 0);
+    assert_eq!(t.token.balance(&t.client.address), 0);
+
+    // Exactly at minimum (100) succeeds.
+    let at_min_id = t.client.create_bounty(
+        &t.creator,
+        &t.s("org/repo#at-min"),
+        &100,
+        &t.token.address,
+        &DEADLINE,
+    );
+    assert_eq!(at_min_id, 1);
+
+    // Above minimum (150) succeeds.
+    let above_min_id = t.client.create_bounty(
+        &t.creator,
+        &t.s("org/repo#above-min"),
+        &150,
+        &t.token.address,
+        &DEADLINE,
+    );
+    assert_eq!(above_min_id, 2);
+    assert_eq!(t.token.balance(&t.client.address), 250);
+
+    // Another token still defaults to 0 until configured.
+    let other_sac = t
+        .env
+        .register_stellar_asset_contract_v2(Address::generate(&t.env));
+    StellarAssetClient::new(&t.env, &other_sac.address()).mint(&t.creator, &50);
+    assert_eq!(t.client.get_min_amount(&other_sac.address()), 0);
+    let other_id = t.client.create_bounty(
+        &t.creator,
+        &t.s("org/repo#other-token"),
+        &1,
+        &other_sac.address(),
+        &DEADLINE,
+    );
+    assert_eq!(other_id, 3);
+}

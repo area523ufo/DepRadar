@@ -319,3 +319,12 @@ is closed — see [CONTRIBUTING.md](CONTRIBUTING.md).
 - **By:** ALLEN-AYODEJI
 - **Closes:** N/A
 - **Status:** Merged.
+
+### typosquat scanner — edit-operation script in `ScanResult` and `Display`
+
+- **What:** Adds `EditOp` (`Insert`, `Delete`, `Substitute`), `edit_script(target, candidate)` and `format_edit_script(candidate, target, ops)` in `src/typosquat/distance.rs`. Stores `edit_ops: Vec<EditOp>` on `ScanResult` in `src/typosquat/scanner.rs` and renders the human-readable edit equation in `Display` (for example, `` `expresss` = `express` + inserted `s` at 7 ``).
+- **Tests:** Unit tests in `distance.rs` and `scanner.rs` covering insertion (`expresss`), deletion (`expres`), substitution (`requezts`), and transposition (`recat`).
+- **By:** area523ufo
+- **Closes:** #176
+- **Status:** Ready for review.
+

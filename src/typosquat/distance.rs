@@ -2,9 +2,110 @@
 //!
 //! A typosquatted package name is, almost by definition, a small number of
 //! keystroke edits away from a popular one. [`levenshtein_distance`] measures
-//! that gap and [`nearest_match`] finds the closest legitimate name in a
-//! reference set. No scoring or thresholding lives here — callers decide what
-//! counts as "suspiciously close".
+//! that gap, [`nearest_match`] finds the closest legitimate name in a
+//! reference set, and [`edit_script`] reconstructs the exact character-level
+//! operations that turn the reference name into the candidate. No scoring or
+//! thresholding lives here — callers decide what counts as "suspiciously
+//! close".
+
+use std::fmt;
+
+/// A single character-level edit operation transforming a reference `target`
+/// name into a `candidate` name.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum EditOp {
+    /// Inserted `ch` at 0-based `pos` in the candidate string.
+    Insert { pos: usize, ch: char },
+    /// Deleted `ch` from 0-based `pos` in the target string.
+    Delete { pos: usize, ch: char },
+    /// Substituted `from` (in target) with `to` (in candidate) at 0-based `pos`.
+    Substitute { pos: usize, from: char, to: char },
+}
+
+impl fmt::Display for EditOp {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Insert { pos, ch } => write!(f, "inserted `{ch}` at {pos}"),
+            Self::Delete { pos, ch } => write!(f, "deleted `{ch}` at {pos}"),
+            Self::Substitute { pos, from, to } => {
+                write!(f, "substituted `{from}` -> `{to}` at {pos}")
+            }
+        }
+    }
+}
+
+/// Computes a minimal sequence of [`EditOp`]s that transforms `target` (the
+/// reference package name) into `candidate`.
+///
+/// Uses a suffix dynamic-programming table so that forward reconstruction
+/// greedily preserves the longest matching prefixes first (for example,
+/// turning `"express"` into `"expresss"` reports `Insert { pos: 7, ch: 's' }`
+/// at the trailing character rather than in the middle of the `'s'` run).
+pub fn edit_script(target: &str, candidate: &str) -> Vec<EditOp> {
+    let t: Vec<char> = target.chars().collect();
+    let c: Vec<char> = candidate.chars().collect();
+    let m = t.len();
+    let n = c.len();
+
+    // `dp[i][j]` holds the minimum edit distance between `t[i..]` and `c[j..]`.
+    let mut dp = vec![vec![0usize; n + 1]; m + 1];
+    for (i, row) in dp.iter_mut().enumerate().take(m + 1) {
+        row[n] = m - i;
+    }
+    for (j, cell) in dp[m].iter_mut().enumerate() {
+        *cell = n - j;
+    }
+
+    for i in (0..m).rev() {
+        for j in (0..n).rev() {
+            let sub_cost = usize::from(t[i] != c[j]);
+            dp[i][j] = (dp[i + 1][j] + 1)
+                .min(dp[i][j + 1] + 1)
+                .min(dp[i + 1][j + 1] + sub_cost);
+        }
+    }
+
+    let mut ops = Vec::with_capacity(dp[0][0]);
+    let mut i = 0;
+    let mut j = 0;
+
+    while i < m || j < n {
+        if i < m && j < n && t[i] == c[j] && dp[i][j] == dp[i + 1][j + 1] {
+            i += 1;
+            j += 1;
+        } else if i < m && j < n && dp[i][j] == dp[i + 1][j + 1] + 1 {
+            ops.push(EditOp::Substitute {
+                pos: j,
+                from: t[i],
+                to: c[j],
+            });
+            i += 1;
+            j += 1;
+        } else if j < n && dp[i][j] == dp[i][j + 1] + 1 {
+            ops.push(EditOp::Insert { pos: j, ch: c[j] });
+            j += 1;
+        } else if i < m && dp[i][j] == dp[i + 1][j] + 1 {
+            ops.push(EditOp::Delete { pos: i, ch: t[i] });
+            i += 1;
+        }
+    }
+
+    ops
+}
+
+/// Renders a human-readable equation explaining how `target` became
+/// `candidate` via `ops` (e.g. `` `expresss` = `express` + inserted `s` at 7 ``).
+pub fn format_edit_script(candidate: &str, target: &str, ops: &[EditOp]) -> String {
+    if ops.is_empty() {
+        return format!("`{candidate}` = `{target}`");
+    }
+    let steps = ops
+        .iter()
+        .map(ToString::to_string)
+        .collect::<Vec<_>>()
+        .join(" + ");
+    format!("`{candidate}` = `{target}` + {steps}")
+}
 
 /// Standard Levenshtein edit distance between `a` and `b`: the minimum number
 /// of single-character insertions, deletions, or substitutions that turns one
@@ -100,6 +201,63 @@ mod tests {
         // plain Levenshtein has no transposition op: swapping two chars is one
         // deletion + one insertion (or two substitutions).
         assert_eq!(levenshtein_distance("recat", "react"), 2);
+    }
+
+    #[test]
+    fn edit_script_captures_insert_delete_substitute_and_transposition() {
+        // Insert: "express" -> "expresss" (extra 's' at index 7)
+        let insert_ops = edit_script("express", "expresss");
+        assert_eq!(insert_ops, vec![EditOp::Insert { pos: 7, ch: 's' }]);
+        assert_eq!(
+            format_edit_script("expresss", "express", &insert_ops),
+            "`expresss` = `express` + inserted `s` at 7"
+        );
+
+        // Delete: "express" -> "expres" (dropped 's' at index 6)
+        let delete_ops = edit_script("express", "expres");
+        assert_eq!(delete_ops, vec![EditOp::Delete { pos: 6, ch: 's' }]);
+        assert_eq!(
+            format_edit_script("expres", "express", &delete_ops),
+            "`expres` = `express` + deleted `s` at 6"
+        );
+
+        // Substitute: "requests" -> "requezts" ('s' -> 'z' at index 5)
+        let sub_ops = edit_script("requests", "requezts");
+        assert_eq!(
+            sub_ops,
+            vec![EditOp::Substitute {
+                pos: 5,
+                from: 's',
+                to: 'z'
+            }]
+        );
+        assert_eq!(
+            format_edit_script("requezts", "requests", &sub_ops),
+            "`requezts` = `requests` + substituted `s` -> `z` at 5"
+        );
+
+        // Transposition: "react" -> "recat" (two edits at positions 2 and 3)
+        let trans_ops = edit_script("react", "recat");
+        assert_eq!(trans_ops.len(), 2);
+        assert_eq!(
+            trans_ops,
+            vec![
+                EditOp::Substitute {
+                    pos: 2,
+                    from: 'a',
+                    to: 'c'
+                },
+                EditOp::Substitute {
+                    pos: 3,
+                    from: 'c',
+                    to: 'a'
+                },
+            ]
+        );
+        assert_eq!(
+            format_edit_script("recat", "react", &trans_ops),
+            "`recat` = `react` + substituted `a` -> `c` at 2 + substituted `c` -> `a` at 3"
+        );
     }
 
     #[test]

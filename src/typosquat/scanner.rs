@@ -10,7 +10,7 @@
 use std::fmt;
 
 use super::dataset::load_popular_packages;
-use super::distance::nearest_match;
+use super::distance::{edit_script, format_edit_script, nearest_match, EditOp};
 use super::homoglyph::homoglyph_impersonation;
 
 /// Maximum edit distance from a popular package name that counts as
@@ -32,6 +32,9 @@ pub struct ScanResult {
     /// [`DISTANCE_THRESHOLD`] edits (and not an exact match): the matched
     /// name and the edit distance to it.
     pub distance_match: Option<(String, usize)>,
+    /// Exact character-level edit operations that transform the matched
+    /// popular package into `candidate` when [`Self::distance_match`] is set.
+    pub edit_ops: Vec<EditOp>,
     /// Set when [`homoglyph_impersonation`] found that the candidate, once
     /// lookalike characters are folded back to Latin, is a popular package:
     /// the matched name.
@@ -53,9 +56,15 @@ impl fmt::Display for ScanResult {
 
         write!(f, "{}: likely typosquat", self.candidate)?;
         if let Some((name, distance)) = &self.distance_match {
+            let ops = if self.edit_ops.is_empty() {
+                edit_script(name, &self.candidate)
+            } else {
+                self.edit_ops.clone()
+            };
+            let explanation = format_edit_script(&self.candidate, name, &ops);
             write!(
                 f,
-                "\n  - edit distance {distance} from popular package \"{name}\""
+                "\n  - edit distance {distance} from popular package \"{name}\" ({explanation})"
             )?;
         }
         if let Some(name) = &self.homoglyph_match {
@@ -76,14 +85,19 @@ pub fn score_package(name: &str) -> ScanResult {
     let dataset = load_popular_packages();
 
     let (nearest_name, distance) = nearest_match(name, &dataset);
-    let distance_match =
-        (distance > 0 && distance <= DISTANCE_THRESHOLD).then_some((nearest_name, distance));
+    let (distance_match, edit_ops) = if distance > 0 && distance <= DISTANCE_THRESHOLD {
+        let ops = edit_script(&nearest_name, name);
+        (Some((nearest_name, distance)), ops)
+    } else {
+        (None, Vec::new())
+    };
 
     let homoglyph_match = homoglyph_impersonation(name, &dataset);
 
     ScanResult {
         candidate: name.to_string(),
         distance_match,
+        edit_ops,
         homoglyph_match,
     }
 }
@@ -96,6 +110,7 @@ mod tests {
     fn exact_popular_package_is_not_flagged() {
         let result = score_package("react");
         assert_eq!(result.distance_match, None);
+        assert!(result.edit_ops.is_empty());
         assert_eq!(result.homoglyph_match, None);
         assert!(!result.is_likely_typosquat());
     }
@@ -107,6 +122,7 @@ mod tests {
         // entry).
         let result = score_package("definitely-not-a-real-package-zzz123");
         assert_eq!(result.distance_match, None);
+        assert!(result.edit_ops.is_empty());
         assert_eq!(result.homoglyph_match, None);
         assert!(!result.is_likely_typosquat());
     }
@@ -116,6 +132,7 @@ mod tests {
         // One inserted 's' — no homoglyphs involved.
         let result = score_package("expresss");
         assert_eq!(result.distance_match, Some(("express".to_string(), 1)));
+        assert_eq!(result.edit_ops, vec![EditOp::Insert { pos: 7, ch: 's' }]);
         assert_eq!(result.homoglyph_match, None);
         assert!(result.is_likely_typosquat());
     }
@@ -128,6 +145,7 @@ mod tests {
         let fullwidth = "\u{FF52}\u{FF45}\u{FF51}\u{FF55}\u{FF45}\u{FF53}\u{FF54}\u{FF53}";
         let result = score_package(fullwidth);
         assert_eq!(result.distance_match, None);
+        assert!(result.edit_ops.is_empty());
         assert_eq!(result.homoglyph_match.as_deref(), Some("requests"));
         assert!(result.is_likely_typosquat());
     }
@@ -139,6 +157,14 @@ mod tests {
         // homoglyph impersonation of it.
         let result = score_package("re\u{0430}ct");
         assert_eq!(result.distance_match, Some(("react".to_string(), 1)));
+        assert_eq!(
+            result.edit_ops,
+            vec![EditOp::Substitute {
+                pos: 2,
+                from: 'a',
+                to: '\u{0430}'
+            }]
+        );
         assert_eq!(result.homoglyph_match.as_deref(), Some("react"));
         assert!(result.is_likely_typosquat());
     }
@@ -149,7 +175,29 @@ mod tests {
         let rendered = result.to_string();
         assert!(rendered.contains("likely typosquat"));
         assert!(rendered.contains("edit distance 1 from popular package \"react\""));
+        assert!(rendered.contains("`re\u{0430}ct` = `react` + substituted `a` -> `\u{0430}` at 2"));
         assert!(rendered.contains("homoglyph impersonation of popular package \"react\""));
+    }
+
+    #[test]
+    fn display_renders_insert_delete_substitute_and_transposition_scripts() {
+        // Insert case
+        let insert_rendered = score_package("expresss").to_string();
+        assert!(insert_rendered.contains("`expresss` = `express` + inserted `s` at 7"));
+
+        // Delete case
+        let delete_rendered = score_package("expres").to_string();
+        assert!(delete_rendered.contains("`expres` = `express` + deleted `s` at 6"));
+
+        // Substitute case
+        let sub_rendered = score_package("requezts").to_string();
+        assert!(sub_rendered.contains("`requezts` = `requests` + substituted `s` -> `z` at 5"));
+
+        // Transposition case (2 edits in Levenshtein)
+        let trans_rendered = score_package("recat").to_string();
+        assert!(trans_rendered.contains(
+            "`recat` = `react` + substituted `a` -> `c` at 2 + substituted `c` -> `a` at 3"
+        ));
     }
 
     #[test]
